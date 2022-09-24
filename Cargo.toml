@@ -1,0 +1,9 @@
+[package]
+name = "red"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "3.2.22", features = ["derive"] }
+nom = "7"
+rustyline = "10.0.0"
