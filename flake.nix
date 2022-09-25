@@ -33,24 +33,21 @@
         packages.${name} = naersk-lib.buildPackage {
           pname = "${name}";
           root = ./.;
+          doCheck = true;
           copyLibs = true;
           buildInputs = deps;
         };
-
-        defaultPackage = packages.${name};
         packages.default = packages.${name};
 
         apps.${name} = utils.lib.mkApp {
           inherit name;
           drv = packages.${name};
         };
-        defaultApp = apps.${name};
         apps.default = apps.${name};
 
         checks.pre-commit-check = pre-commit-hooks.lib.${system}.run {
           src = nixpkgs.lib.cleanSource ../.;
           hooks = {
-            nix-linter.enable = true;
             alejandra.enable = true;
             statix.enable = true;
 
