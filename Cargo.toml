@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "3.2.22", features = ["derive"] }
-nom = "7"
+nom = { version = "7.1.1", features = ["alloc"] }
 rustyline = "10.0.0"
