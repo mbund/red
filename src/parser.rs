@@ -4,7 +4,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{char, one_of};
 use nom::combinator::{opt, recognize};
-use nom::error::{context, ContextError, ParseError, VerboseError};
+use nom::error::{context, VerboseError};
 use nom::multi::{many0, many1};
 use nom::sequence::{separated_pair, terminated, tuple};
 use nom::IResult;
@@ -13,16 +13,14 @@ type Res<T, U> = IResult<T, U, VerboseError<T>>;
 
 #[derive(Debug, PartialEq)]
 pub enum Address {
-    Singular(SingularAddress),
+    Singular(Option<SingularAddress>),
     Range(AddressRange),
 }
 
 #[derive(Debug, PartialEq)]
 pub enum AddressRange {
-    Absolute((SingularAddress, SingularAddress)),
-    Relative((SingularAddress, SingularAddress)),
-    PageForward,
-    PageBackward,
+    Absolute((Option<SingularAddress>, Option<SingularAddress>)),
+    Relative((Option<SingularAddress>, Option<SingularAddress>)),
 }
 
 #[derive(Debug, PartialEq)]
@@ -59,15 +57,17 @@ fn line_parser(i: &str) -> Res<&str, AddressPosition> {
 }
 
 fn offset_parser(i: &str) -> Res<&str, i64> {
-    context("offset", tuple((alt((tag("+"), tag("-"))), decimal)))(i).map(|(i, (sign, number))| {
-        (
-            i,
-            number.parse::<i64>().unwrap() * (if sign == "-" { -1 } else { 1 }),
-        )
-    })
+    context("offset", tuple((alt((tag("+"), tag("-"))), opt(decimal))))(i).map(
+        |(i, (sign, number))| {
+            (
+                i,
+                number.unwrap_or("1").parse::<i64>().unwrap() * (if sign == "-" { -1 } else { 1 }),
+            )
+        },
+    )
 }
 
-pub fn singular_address_parser(i: &str) -> Res<&str, SingularAddress> {
+pub fn singular_address_parser(i: &str) -> Res<&str, Option<SingularAddress>> {
     context(
         "full_address",
         tuple((
@@ -78,9 +78,12 @@ pub fn singular_address_parser(i: &str) -> Res<&str, SingularAddress> {
     .map(|(i, (address_position, offset))| {
         (
             i,
-            SingularAddress {
-                position: address_position.unwrap_or(AddressPosition::Default),
-                offset: offset.unwrap_or(0),
+            match address_position {
+                Some(addr) => Some(SingularAddress {
+                    position: addr,
+                    offset: offset.unwrap_or(0),
+                }),
+                None => None,
             },
         )
     })
@@ -91,18 +94,30 @@ pub fn address_parser(i: &str) -> Res<&str, Address> {
         .map(|(i, full_address)| (i, Address::Singular(full_address)))
 }
 
-pub fn address_range_parser(i: &str) -> Res<&str, Address> {
+pub fn address_range_absolute_parser(i: &str) -> Res<&str, Address> {
     context(
-        "address_range",
+        "address_range_absolute",
         separated_pair(singular_address_parser, tag(","), singular_address_parser),
     )(i)
     .map(|(i, (addr1, addr2))| (i, Address::Range(AddressRange::Absolute((addr1, addr2)))))
 }
 
+pub fn address_range_relative_parser(i: &str) -> Res<&str, Address> {
+    context(
+        "address_range_relative",
+        separated_pair(singular_address_parser, tag(";"), singular_address_parser),
+    )(i)
+    .map(|(i, (addr1, addr2))| (i, Address::Range(AddressRange::Relative((addr1, addr2)))))
+}
+
 pub fn either_address_parser(i: &str) -> Res<&str, Address> {
     context(
         "either_address",
-        alt((address_range_parser, address_parser)),
+        alt((
+            address_range_absolute_parser,
+            address_range_relative_parser,
+            address_parser,
+        )),
     )(i)
 }
 
@@ -110,32 +125,25 @@ pub fn either_address_parser(i: &str) -> Res<&str, Address> {
 pub struct AppendCommand {
     pub addr: Address,
 }
-impl AppendCommand {
-    const DEFAULT_ADDRESS: Address = Address::Range(AddressRange::Absolute((
-        SingularAddress {
-            position: AddressPosition::CurrentLine,
-            offset: 0,
-        },
-        SingularAddress {
-            position: AddressPosition::CurrentLine,
-            offset: 0,
-        },
-    )));
-}
 
 #[derive(Debug, PartialEq)]
 pub struct MoveCommand {
     prev_addr: Address,
-    addr: SingularAddress,
+    addr: Option<SingularAddress>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct InsertCommand {
-    pub addr: SingularAddress,
+    pub addr: Option<SingularAddress>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct PrintNoLinesCommand {
+    pub addr: Address,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ChangeCommand {
     pub addr: Address,
 }
 
@@ -145,6 +153,7 @@ pub enum Command {
     Move(MoveCommand),
     Insert(InsertCommand),
     PrintNoLines(PrintNoLinesCommand),
+    Change(ChangeCommand),
 }
 
 pub fn append_parser(i: &str) -> Res<&str, Command> {
@@ -174,8 +183,13 @@ pub fn insert_parser(i: &str) -> Res<&str, Command> {
 }
 
 pub fn print_no_lines_parser(i: &str) -> Res<&str, Command> {
-    context("append", tuple((either_address_parser, tag("p"))))(i)
+    context("print", tuple((either_address_parser, tag("p"))))(i)
         .map(|(i, (addr, _))| (i, Command::PrintNoLines(PrintNoLinesCommand { addr: addr })))
+}
+
+pub fn change_parser(i: &str) -> Res<&str, Command> {
+    context("change", tuple((either_address_parser, tag("c"))))(i)
+        .map(|(i, (addr, _))| (i, Command::Change(ChangeCommand { addr: addr })))
 }
 
 pub fn command_parser(i: &str) -> Res<&str, Command> {
@@ -186,98 +200,7 @@ pub fn command_parser(i: &str) -> Res<&str, Command> {
             move_parser,
             insert_parser,
             print_no_lines_parser,
+            change_parser,
         )),
     )(i)
-}
-
-#[test]
-fn command_parser_test() {
-    assert_eq!(
-        command_parser("47a"),
-        Ok((
-            "",
-            Command::Append(AppendCommand {
-                addr: Address::Singular(SingularAddress {
-                    position: AddressPosition::Line(47),
-                    offset: 0
-                })
-            })
-        ))
-    );
-
-    assert_eq!(
-        command_parser("7m$"),
-        Ok((
-            "",
-            Command::Move(MoveCommand {
-                prev_addr: Address::Singular(SingularAddress {
-                    position: AddressPosition::Line(7),
-                    offset: 0
-                }),
-                addr: SingularAddress {
-                    position: AddressPosition::LastLine,
-                    offset: 0
-                }
-            })
-        ))
-    );
-
-    assert_eq!(
-        command_parser("10+2+3a"),
-        Ok((
-            "",
-            Command::Move(MoveCommand {
-                prev_addr: Address::Singular(SingularAddress {
-                    position: AddressPosition::Line(7),
-                    offset: 0
-                }),
-                addr: SingularAddress {
-                    position: AddressPosition::LastLine,
-                    offset: 0
-                }
-            })
-        ))
-    );
-}
-
-#[test]
-fn append_parser_test() {
-    assert_eq!(
-        append_parser("a"),
-        Ok((
-            "",
-            Command::Append(AppendCommand {
-                addr: Address::Singular(SingularAddress {
-                    position: AddressPosition::Default,
-                    offset: 0
-                })
-            })
-        ))
-    );
-
-    assert_eq!(
-        append_parser("30-4a"),
-        Ok((
-            "",
-            Command::Append(AppendCommand {
-                addr: Address::Singular(SingularAddress {
-                    position: AddressPosition::Line(30),
-                    offset: -4,
-                })
-            })
-        ))
-    );
-
-    assert_eq!(
-        append_parser("$a"),
-        Ok((
-            "",
-            Command::Append(AppendCommand {
-                addr: Address::Singular(SingularAddress {
-                    position: AddressPosition::LastLine,
-                    offset: 0,
-                })
-            })
-        ))
-    );
 }
